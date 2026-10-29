@@ -1,553 +1,337 @@
+"""
+European put option: convergence of binomial tree models to Black-Scholes.
+
+Models:        CRR (Cox-Ross-Rubinstein), Tian, LR (Leisen-Reimer)
+Smoothing:     BSS (Black-Scholes smoothing), AS (averaging), PEG (pegging the strike)
+Extrapolation: RE (Richardson extrapolation)
+"""
+
 import numpy as np
 import matplotlib.pyplot as plt
-import pandas as pd
 from scipy.stats import norm
 
-# Black-Scholes Formula for a European Call Option
+
+# --------------------------------------------------------------------------- #
+# Parameters: set CASE to "base" or "seminar"
+# --------------------------------------------------------------------------- #
+CASE = "base"
+
+PARAMS = {
+    "base":    dict(S0=100.0, K=100.0, r=0.05, sigma=0.20, T=1.0),
+    "seminar": dict(S0=100.0, K=110.0, r=0.02, sigma=0.40, T=0.5),
+}
+
+
+# --------------------------------------------------------------------------- #
+# Black-Scholes formula for a European put (also works with an array S0)
+# --------------------------------------------------------------------------- #
 def black_scholes_put(S0, K, r, sigma, T):
     d1 = (np.log(S0 / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
-    put = -S0 * norm.cdf(-d1) + K * np.exp(-r * T) * norm.cdf(-d2)
-    return put
+    return K * np.exp(-r * T) * norm.cdf(-d2) - S0 * norm.cdf(-d1)
 
-# Defining Binomial Models
-def crr(S0, K, r, sigma, T, N):
+
+# --------------------------------------------------------------------------- #
+# Shared tree helpers
+# --------------------------------------------------------------------------- #
+def stock_layer(S0, u, d, n):
+    """Stock prices after n steps, from the lowest (j = 0) to the highest (j = n)."""
+    j = np.arange(n + 1)
+    return S0 * u**j * d**(n - j)
+
+
+def backward_induction(C, p, discount):
+    """Roll the option values C back to t = 0.
+
+    At each step, node j of the previous layer gets
+        discount * (p * C[j+1] + (1 - p) * C[j]),
+    i.e. C[1:] are the up-moves and C[:-1] the down-moves.
+    Each step shortens the array by one; at the end only C[0] is left.
+    """
+    while len(C) > 1:
+        C = discount * (p * C[1:] + (1 - p) * C[:-1])
+    return C[0]
+
+
+def price_on_tree(S0, K, r, T, N, u, d, p):
+    """European put on a binomial tree with given u, d, p."""
+    C = np.maximum(K - stock_layer(S0, u, d, N), 0.0)   # put payoff at maturity
+    return backward_induction(C, p, np.exp(-r * T / N))
+
+
+def price_on_tree_BSS(S0, K, r, sigma, T, N, u, d, p):
+    """Black-Scholes smoothing: on the penultimate layer the option value is the
+    Black-Scholes price with time to maturity dt (removes the payoff kink)."""
+    dt = T / N
+    C = black_scholes_put(stock_layer(S0, u, d, N - 1), K, r, sigma, dt)
+    return backward_induction(C, p, np.exp(-r * dt))
+
+
+# --------------------------------------------------------------------------- #
+# Lattice parameters
+# --------------------------------------------------------------------------- #
+def crr_params(r, sigma, T, N):
     dt = T / N
     u = np.exp(sigma * np.sqrt(dt))
     d = 1 / u
     p = (np.exp(r * dt) - d) / (u - d)
+    return u, d, p
 
-    # last layer of the stock tree
-    ST_list=[]
-    for j in range(N+1):
-        ST_list.append(S0 * (u**j) * (d**(N - j)))
-    ST=np.array(ST_list)
 
-    # option value at maturity
-    C = np.maximum(-ST + K, 0.0)
+def peg_params(S0, K, r, sigma, T, N):
+    """CRR tree rescaled by gamma so that the final node closest to K lands on K."""
+    dt = T / N
+    u_crr, d_crr, _ = crr_params(r, sigma, T, N)
+    ST = stock_layer(S0, u_crr, d_crr, N)
+    S_closest = ST[np.argmin(np.abs(ST - K))]
+    gamma = (K / S_closest) ** (1 / N)
+    u, d = u_crr * gamma, d_crr * gamma
+    p = (np.exp(r * dt) - d) / (u - d)
+    return u, d, p
 
-    # backward induction
-    discount = np.exp(-r * dt)
-    for i in range(N, 0, -1):
-       
-        C_nuovo = np.zeros(i)
-        
-        
-        for j in range(i):
-            
-            valore_atteso = p * C[j+1] + (1-p) * C[j]
-            C_nuovo[j] = discount * valore_atteso
-        
-        
-        C = C_nuovo
-    
-   
-    return C[0]
+
+def peizer_pratt(z, N):
+    """Peizer-Pratt inversion (method 2), used by Leisen-Reimer."""
+    return 0.5 + np.sign(z) * np.sqrt(
+        0.25 - 0.25 * np.exp(-(z / (N + 1 / 3))**2 * (N + 1 / 6)))
+
+
+# --------------------------------------------------------------------------- #
+# Binomial models
+# --------------------------------------------------------------------------- #
+def crr(S0, K, r, sigma, T, N):
+    u, d, p = crr_params(r, sigma, T, N)
+    return price_on_tree(S0, K, r, T, N, u, d, p)
+
 
 def tian(S0, K, r, sigma, T, N):
     dt = T / N
-    M=np.exp(r*dt)
-    V=np.exp(sigma**2*dt)
-    u=0.5*(M*V)*(V+1+np.sqrt(V**2+2*V-3))
-    d=0.5*(M*V)*(V+1-np.sqrt(V**2+2*V-3))
-    p = (np.exp(r * dt) - d) / (u - d)
+    M = np.exp(r * dt)
+    V = np.exp(sigma**2 * dt)
+    root = np.sqrt(V**2 + 2 * V - 3)
+    u = 0.5 * M * V * (V + 1 + root)
+    d = 0.5 * M * V * (V + 1 - root)
+    p = (M - d) / (u - d)
+    return price_on_tree(S0, K, r, T, N, u, d, p)
 
-    # last layer of the stock tree
-    ST_list=[]
-    for j in range(N+1):
-        ST_list.append(S0 * (u**j) * (d**(N - j)))
-    ST=np.array(ST_list)
-
-
-    # option value at maturity
-    C = np.maximum(-ST + K, 0.0)
-
-    # backward induction
-    discount = np.exp(-r * dt)
-    for i in range(N, 0, -1):
-        
-        C_nuovo = np.zeros(i)
-        
-        for j in range(i):
-            
-            valore_atteso = p * C[j+1] + (1-p) * C[j]
-            C_nuovo[j] = discount * valore_atteso
-        
-        
-        C = C_nuovo
-    
-    return C[0]
 
 def LR(S0, K, r, sigma, T, N):
-    dt=T/N
-    a=np.exp(r*dt)
+    if N % 2 == 0:
+        raise ValueError("Leisen-Reimer needs an odd number of steps")
+    dt = T / N
+    a = np.exp(r * dt)
     d1 = (np.log(S0 / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
-    p=0.5+np.sqrt(0.25-0.25*np.exp(-((d2)/(N+(1/3)))**2*(N+(1/6))))
-    P=0.5+np.sqrt(0.25-0.25*np.exp(-((d2+sigma*(np.sqrt(T)))/(N+(1/3)))**2*(N+(1/6))))
-    u=a*(P/p)
-    d=a*((1-P)/(1-p))
-
-    # last layer of the stock tree
-    ST_list=[]
-    for j in range(N+1):
-        ST_list.append(S0 * (u**j) * (d**(N - j)))
-    ST=np.array(ST_list)
+    p = peizer_pratt(d2, N)
+    P = peizer_pratt(d1, N)
+    u = a * P / p
+    d = a * (1 - P) / (1 - p)
+    return price_on_tree(S0, K, r, T, N, u, d, p)
 
 
-    # option value at maturity
-    C = np.maximum(-ST + K, 0.0)
-
-    # backward induction
-    discount = np.exp(-r * dt)
-    for i in range(N, 0, -1):
-       
-        C_nuovo = np.zeros(i)
-        
-        for j in range(i):
-            valore_atteso = p * C[j+1] + (1-p) * C[j]
-            C_nuovo[j] = discount * valore_atteso
-        
-        C = C_nuovo
-    return C[0]
-
-# Defining Smoothing techniques and Richardson extrapolation
-def crr_BSS(S0, K, r, sigma, T, N): # Black-Scholes smoothing
-    dt = T / N
-    u = np.exp(sigma * np.sqrt(dt))
-    d = 1 / u
-    p = (np.exp(r * dt) - d) / (u - d)
-
-    # penultimate layer of the stock tree
-    ST_list=[]
-    for j in range(N):
-       S_p=S0 * (u**j) * (d**((N-1) - j))
-       ST_list.append(black_scholes_put(S_p, K, r, sigma, dt))
-    ST=np.array(ST_list)
-    
-
-    discount = np.exp(-r * dt)
-    for i in range(N-1, 0, -1):
-        C=np.zeros(i)
-        for j in range(i):
-            valore_atteso=p*ST[j+1]+(1-p)*ST[j]
-            C[j]=discount*valore_atteso
-        
-        ST=C
-
-    return ST[0]
-
-def crr_AS(S0, K, r, sigma, T, N): # Averaging smoothing
-    p1 = crr(S0, K, r, sigma, T, N)
-    p2 = crr(S0, K, r, sigma, T, N+1)
-    return (p1+p2)/2
-
-def crr_RE (S0, K, r, sigma, T, N): # Richardson Extrapolation
-    p1 = crr(S0, K, r, sigma, T, N)
-    p2 = crr(S0, K, r, sigma, T, 2*N)
-    return (2*p2-p1)
-
-def LR_RE (S0, K, r, sigma, T, N): 
-    p1 = LR(S0, K, r, sigma, T, N)
-    p2 = LR(S0, K, r, sigma, T, 2*N+1)
-    return ((4*p2-p1)/3)
+# --------------------------------------------------------------------------- #
+# Smoothing techniques and Richardson extrapolation
+# --------------------------------------------------------------------------- #
+def crr_BSS(S0, K, r, sigma, T, N):          # Black-Scholes smoothing
+    u, d, p = crr_params(r, sigma, T, N)
+    return price_on_tree_BSS(S0, K, r, sigma, T, N, u, d, p)
 
 
-def crr_PEG (S0, K, r, sigma, T, N): #Pegging the strike
-    dt = T / N
-    u=np.exp(sigma*np.sqrt(dt)+dt*np.log(K/S0))
-    d=1/u
-    p = (np.exp(r * dt) - d) / (u - d)
-
-    # last layer of the stock tree
-    ST_list=[]
-    for j in range(N+1):
-        ST_list.append(S0 * (u**j) * (d**(N - j)))
-    ST=np.array(ST_list)
-
-    # option value at maturity
-    C = np.maximum(-ST + K, 0.0)
-
-    # backward induction
-    discount = np.exp(-r * dt)
-    for i in range(N, 0, -1):
-        C_nuovo = np.zeros(i)
-        
-        for j in range(i):
-            valore_atteso = p * C[j+1] + (1-p) * C[j]
-            C_nuovo[j] = discount * valore_atteso
-        
-        C = C_nuovo
-    return C[0]
-
-"""
-
-def crr_PEG (S0, K, r, sigma, T, N): #Pegging the strike
-    
-    dt = T / N
-
-    u_crr = np.exp(sigma * np.sqrt(dt))
-    d_crr = np.exp(-sigma * np.sqrt(dt))
-    
-   
-    j_values = np.arange(N + 1)
-    final_S_crr = S0 * (u_crr**(N - j_values)) * (d_crr**j_values)
-    
-    
-    j_star = np.argmin(np.abs(final_S_crr - K))
-    
-    S_j_star = final_S_crr[j_star]
-    
-    
-    gamma = (K / S_j_star)**(1 / N)
-
-   
-    u_peg = u_crr * gamma
-    d_peg = d_crr * gamma
-    
-   
-    q_peg = (np.exp(r * dt) - d_peg) / (u_peg - d_peg)
-    q_d = 1.0 - q_peg
-
-    j_values = np.arange(N + 1)
-    Sn = S0 * (u_peg**(N - j_values)) * (d_peg**j_values)
-    
-   
-    V = np.maximum(-Sn + K, 0)
-    
-    for n in range(N - 1, -1, -1):
-        V = np.exp(-r * dt) * (q_peg * V[:n+1] + q_d * V[1:n+2])
-
-    return V[0]
-
-"""
-def crr_BSS_RE (S0, K, r, sigma, T, N): 
-    p1 = crr_BSS(S0, K, r, sigma, T, N)
-    p2 = crr_BSS(S0, K, r, sigma, T, 2*N)
-    return (2*p2-p1)
-
-def crr_AS_RE (S0, K, r, sigma, T, N):
-    p1 = crr_AS(S0, K, r, sigma, T, N)
-    p2 = crr_AS(S0, K, r, sigma, T, 2*N)
-    return (2*p2-p1)
-
-def crr_PEG_RE (S0, K, r, sigma, T, N):
-    p1 = crr_PEG(S0, K, r, sigma, T, N)
-    p2 = crr_PEG(S0, K, r, sigma, T, 2*N)
-    return (2*p2-p1)
-
-def crr_PEG_BSS (S0, K, r, sigma, T, N):
-    dt = T / N
-    u=np.exp(sigma*np.sqrt(dt)+dt*np.log(K/S0))
-    d=1/u
-    p = (np.exp(r * dt) - d) / (u - d)
-
-    # penultimate layer of the stock tree
-    ST_list=[]
-    for j in range(N):
-       S_p=S0 * (u**j) * (d**((N-1) - j))
-       ST_list.append(black_scholes_put(S_p, K, r, sigma, dt))
-    ST=np.array(ST_list)
-    
-
-    discount = np.exp(-r * dt)
-    for i in range(N-1, 0, -1):
-        C=np.zeros(i)
-        for j in range(i):
-            valore_atteso=p*ST[j+1]+(1-p)*ST[j]
-            C[j]=discount*valore_atteso
-        
-        ST=C
-
-    return ST[0]
-
-def crr_PEG_BSS_RE (S0, K, r, sigma, T, N):
-    p1 = crr_PEG_BSS(S0, K, r, sigma, T, N)
-    p2 = crr_PEG_BSS(S0, K, r, sigma, T, 2*N)
-    return (2*p2-p1)
-
-def crr_PEG_AS (S0, K, r, sigma, T, N):   # as = average smoothing
-
-    p1 = crr_PEG(S0, K, r, sigma, T, N)
-    p2 = crr_PEG(S0, K, r, sigma, T, N+1)
-
-    return (p1+p2)/2
-
-def PEG_AS_RE (S0, K, r, sigma, T, N):
-    p1 = crr_PEG_AS(S0, K, r, sigma, T, N)
-    p2 = crr_PEG_AS(S0, K, r, sigma, T, 2*N)
-
-    return (2*p2-p1)
+def crr_AS(S0, K, r, sigma, T, N):           # Averaging smoothing
+    return 0.5 * (crr(S0, K, r, sigma, T, N) + crr(S0, K, r, sigma, T, N + 1))
 
 
-# -------------------------
+def crr_RE(S0, K, r, sigma, T, N):           # Richardson extrapolation, error O(1/N)
+    return 2 * crr(S0, K, r, sigma, T, 2 * N) - crr(S0, K, r, sigma, T, N)
+
+
+def LR_RE(S0, K, r, sigma, T, N):            # Richardson for LR, error O(1/N^2)
+    # 2N+1 keeps the number of steps odd
+    return (4 * LR(S0, K, r, sigma, T, 2 * N + 1) - LR(S0, K, r, sigma, T, N)) / 3
+
+
+def crr_PEG(S0, K, r, sigma, T, N):          # Pegging the strike
+    u, d, p = peg_params(S0, K, r, sigma, T, N)
+    return price_on_tree(S0, K, r, T, N, u, d, p)
+
+
+def crr_BSS_RE(S0, K, r, sigma, T, N):
+    return 2 * crr_BSS(S0, K, r, sigma, T, 2 * N) - crr_BSS(S0, K, r, sigma, T, N)
+
+
+def crr_AS_RE(S0, K, r, sigma, T, N):
+    return 2 * crr_AS(S0, K, r, sigma, T, 2 * N) - crr_AS(S0, K, r, sigma, T, N)
+
+
+def crr_PEG_RE(S0, K, r, sigma, T, N):
+    return 2 * crr_PEG(S0, K, r, sigma, T, 2 * N) - crr_PEG(S0, K, r, sigma, T, N)
+
+
+def crr_PEG_BSS(S0, K, r, sigma, T, N):
+    u, d, p = peg_params(S0, K, r, sigma, T, N)
+    return price_on_tree_BSS(S0, K, r, sigma, T, N, u, d, p)
+
+
+def crr_PEG_BSS_RE(S0, K, r, sigma, T, N):
+    return 2 * crr_PEG_BSS(S0, K, r, sigma, T, 2 * N) - crr_PEG_BSS(S0, K, r, sigma, T, N)
+
+
+def crr_PEG_AS(S0, K, r, sigma, T, N):
+    return 0.5 * (crr_PEG(S0, K, r, sigma, T, N) + crr_PEG(S0, K, r, sigma, T, N + 1))
+
+
+def PEG_AS_RE(S0, K, r, sigma, T, N):
+    return 2 * crr_PEG_AS(S0, K, r, sigma, T, 2 * N) - crr_PEG_AS(S0, K, r, sigma, T, N)
+
+
+# --------------------------------------------------------------------------- #
+# Plot helpers
+# --------------------------------------------------------------------------- #
+def new_figure(title, ylabel):
+    plt.figure(figsize=(12, 5))
+    plt.title(title)
+    plt.xlabel("Number of Steps (N)")
+    plt.ylabel(ylabel)
+    plt.grid()
+
+
+def finish_figure(BSM_price=None):
+    if BSM_price is not None:
+        plt.axhline(BSM_price, linestyle="--", color="black", label="Black–Scholes", alpha=0.7)
+    plt.legend()
+    plt.tight_layout()
+
+
+# --------------------------------------------------------------------------- #
 # Main comparison script
-# -------------------------
+# --------------------------------------------------------------------------- #
 def compare_models():
+    prm = PARAMS[CASE]
 
-    # Firts parameters used
-    S0 = 100
-    K = 100
-    r = 0.05
-    sigma = 0.2
-    T = 1.0
-    """
-  
-    # Parameters of the seminar
-    S0 = 100
-    K = 110
-    r = 0.02
-    sigma = 0.4
-    T = 0.5
-    """
+    steps = np.arange(200, 400, 3)
+    odd_steps = steps[steps % 2 == 1]       # LR only works with odd N
 
-    # Different binomial steps
-    steps = np.arange(200,400, 3)
-    l = len(steps)
-    even_steps = steps[steps % 2 == 0]
-    l_e = len(even_steps)
-    odd_steps = steps[steps % 2 == 1]
-    l_o =len(odd_steps)
+    BSM_price = black_scholes_put(**prm)
 
-    crr_p = np.zeros(l)
-    tian_p = np.zeros(l)
-    LR_p = np.zeros(l_o)
-    crr_BSS_p = np.zeros(l)
-    crr_AS_p = np.zeros(l)
-    crr_PEG_p = np.zeros(l_e)
-    crr_RE_p = np.zeros(l)
-    crr_BSS_RE_p = np.zeros(l)
-    crr_PEG_RE_p = np.zeros(l_e)
-    crr_AS_RE_p = np.zeros(l)
-    crr_PEG_BSS_p = np.zeros(l_e)
-    crr_PEG_BSS_RE_p = np.zeros(l_e)
-    LR_RE_p = np.zeros(l_o)
-    PEG_AS_RE_p = np.zeros(l_e)
-    crr_PEG_AS_p = np.zeros(l_e)
-   
-    
+    # Prices for every N
+    def prices(method, Ns):
+        return np.array([method(N=N, **prm) for N in Ns])
 
-    BSM_price = black_scholes_put(S0, K, r, sigma, T)
-    index = 0
-    index_e =0
-    index_o =0
-    # Compute prices values
-    for N in steps:
-        crr_p[index]= crr(S0, K, r, sigma, T, N)
-        tian_p[index]=tian(S0, K, r, sigma, T, N)
-        crr_BSS_p[index] = crr_BSS(S0, K, r, sigma, T, N)
-        crr_AS_p[index] = crr_AS(S0, K, r, sigma, T, N)
-        crr_RE_p[index] = crr_RE(S0, K, r, sigma, T, N)
-        crr_AS_RE_p[index] = crr_AS_RE(S0, K, r, sigma, T, N)
-        crr_BSS_RE_p[index] = crr_BSS_RE(S0, K, r, sigma, T, N)
-        
-        if N%2==0:
-             crr_PEG_p[index_e] = crr_PEG(S0, K, r, sigma, T, N)
-             crr_PEG_RE_p[index_e] = crr_PEG_RE(S0, K, r, sigma, T, N)
-             crr_PEG_BSS_p[index_e] = crr_PEG_BSS_RE(S0, K, r, sigma, T, N)
-             crr_PEG_BSS_RE_p[index_e] = crr_PEG_BSS_RE(S0, K, r, sigma, T, N)
-             PEG_AS_RE_p[index_e] = PEG_AS_RE(S0, K, r, sigma, T, N)
-             crr_PEG_AS_p[index_e] = crr_PEG_AS(S0, K, r, sigma, T, N)
-             index_e+=1
-        else:
-            LR_p[index_o] = LR(S0, K, r, sigma, T, N)
-            LR_RE_p[index_o] = LR_RE(S0, K, r, sigma, T, N)
-            index_o+=1
+    crr_p            = prices(crr, steps)
+    tian_p           = prices(tian, steps)
+    LR_p             = prices(LR, odd_steps)
+    crr_BSS_p        = prices(crr_BSS, steps)
+    crr_AS_p         = prices(crr_AS, steps)
+    crr_RE_p         = prices(crr_RE, steps)
+    crr_BSS_RE_p     = prices(crr_BSS_RE, steps)
+    crr_AS_RE_p      = prices(crr_AS_RE, steps)
+    crr_PEG_p        = prices(crr_PEG, steps)
+    crr_PEG_RE_p     = prices(crr_PEG_RE, steps)
+    crr_PEG_BSS_p    = prices(crr_PEG_BSS, steps)
+    crr_PEG_BSS_RE_p = prices(crr_PEG_BSS_RE, steps)
+    crr_PEG_AS_p     = prices(crr_PEG_AS, steps)
+    PEG_AS_RE_p      = prices(PEG_AS_RE, steps)
+    LR_RE_p          = prices(LR_RE, odd_steps)
 
-        index +=1
+    # Absolute errors
+    crr_e  = np.abs(crr_p - BSM_price)
+    tian_e = np.abs(tian_p - BSM_price)
+    LR_e   = np.abs(LR_p - BSM_price)
 
-    #errors
-    crr_e = abs(crr_p - BSM_price)
-    tian_e = abs(tian_p - BSM_price)
-    LR_e = abs(LR_p - BSM_price)
+    print(f"Case: {CASE}  {prm}")
+    print(f"Black–Scholes price: {BSM_price:.6f}")
 
-    crr_BSS_e = abs(crr_BSS_p - BSM_price)
-    crr_AS_e = abs(crr_AS_p - BSM_price)
-    crr_PEG_e = abs(crr_PEG_p - BSM_price)
-    crr_RE_e = abs(crr_RE_p - BSM_price)
-    crr_BSS_RE_e = abs(crr_BSS_RE_p - BSM_price)
-    crr_AS_RE_e = abs(crr_AS_RE_p - BSM_price)
-    crr_PEG_RE_e = abs(crr_PEG_RE_p - BSM_price)
-    crr_PEG_BSS_e = abs(crr_PEG_BSS_p - BSM_price)
-    crr_PEG_BSS_RE_e = abs(crr_PEG_BSS_RE_p - BSM_price)
-
-    LR_e = abs(LR_p -BSM_price)
-    LR_RE_e = abs(LR_RE_p -BSM_price)
- 
     # Price convergence
     # ----------------------------------------- #
-    #CRR
-    plt.figure(figsize=(12, 5))
-    plt.plot(steps, crr_p , label="CRR price") 
-    plt.axhline(BSM_price, linestyle="--", color="black",label="Black–Scholes", alpha=0.7) 
-    plt.title("CRR Convergence to Black–Scholes")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("Put Price")
-    plt.grid()
-    plt.legend()
+    new_figure("CRR Convergence to Black–Scholes", "Put Price")
+    plt.plot(steps, crr_p, label="CRR price")
+    finish_figure(BSM_price)
 
-    #TIAN
-    plt.figure(figsize=(12, 5))
+    new_figure("Tian Convergence to Black–Scholes", "Put Price")
     plt.plot(steps, tian_p, label="Tian price")
-    plt.axhline(BSM_price, linestyle="--", color="black",label="Black–Scholes", alpha=0.7) 
-    plt.title("Tian Convergence to Black–Scholes")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("Put Price")
-    plt.grid()
-    plt.legend()
+    finish_figure(BSM_price)
 
-    #LR
-    plt.figure(figsize=(12, 5))
-    plt.plot(odd_steps, LR_p , label="LR price") 
-    plt.axhline(BSM_price, linestyle="--", color="black",label="Black–Scholes", alpha=0.7) 
-    plt.title("LR method Convergence to Black–Scholes")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("Put Price")
-    plt.grid()
-    plt.legend()
+    new_figure("LR method Convergence to Black–Scholes", "Put Price")
+    plt.plot(odd_steps, LR_p, label="LR price")
+    finish_figure(BSM_price)
 
+    # Errors
+    # ----------------------------------------- #
+    new_figure("Tian error European Put", "Error")
+    plt.plot(steps, tian_e, label="Tian error")
+    finish_figure()
 
-    #ERRORS
-
-    plt.figure(figsize=(12, 5))
-    plt.plot(steps, tian_e, label="Tian error ")
-    plt.title("Tian error European Put")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("Error")
-    plt.grid()
-    plt.legend()
-
-    plt.figure(figsize=(12, 5))
+    new_figure("CRR error European Put", "Error")
     plt.plot(steps, crr_e, label="CRR error")
-    plt.plot(steps, 1/steps, label="1/n")
-    plt.title("CRR error European Put")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("Error")
-    plt.grid()
-    plt.legend()
+    plt.plot(steps, 1 / steps, label="1/N")
+    finish_figure()
 
-    plt.figure(figsize=(12, 5))
+    new_figure("LR error European Put", "Error")
     plt.plot(odd_steps, LR_e, label="LR error")
-    plt.title("LR error European Put")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("Error")
-    plt.grid()
-    plt.legend()
-    
- 
-    # price comparison for all of the three models
-    plt.figure(figsize=(12, 5))
+    finish_figure()
+
+    # Price comparison of the three models
+    new_figure("CRR, Tian and LR Convergence to Black–Scholes", "Put Price")
     plt.plot(steps, tian_p, label="Tian price")
     plt.plot(odd_steps, LR_p, label="LR price")
-    plt.plot(steps, crr_p , label="CRR price") 
-    plt.axhline(BSM_price, linestyle="--", color = "black",label="Black–Scholes", alpha=0.7) 
-    plt.title("CRR, Tian and LR Convergence to Black–Scholes")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("Put Price")
-    plt.grid()
-    plt.legend()
+    plt.plot(steps, crr_p, label="CRR price")
+    finish_figure(BSM_price)
 
-    #errors of the three models
-    plt.figure(figsize=(12,5))
-    plt.plot(steps, crr_e,  label="CRR")
-    plt.plot(steps,tian_e, label="Tian")
-    plt.plot(odd_steps,LR_e, label="LR")
-    plt.title("Absolute error for the three models, european Put")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("Error")
-    plt.grid()
-    plt.legend()
-
+    # Errors of the three models
+    new_figure("Absolute error for the three models, European Put", "Error")
+    plt.plot(steps, crr_e, label="CRR")
+    plt.plot(steps, tian_e, label="Tian")
+    plt.plot(odd_steps, LR_e, label="LR")
+    finish_figure()
 
     # Smoothing
     # -------------------------------------------- #
+    new_figure("Black-Scholes Smoothing", "Put Price")
+    plt.plot(steps, crr_p, label="CRR price")
+    plt.plot(steps, crr_BSS_p, label="CRR + BSS")
+    finish_figure(BSM_price)
 
-    # Black-Scholes smoothing
-    plt.figure(figsize=(12,5))
-    plt.plot(steps, crr_p , label="CRR price") 
-    plt.plot(steps, crr_BSS_p,  label="CRR + BSS")
-    plt.title("Black-Scholes Smoothing")
-    plt.axhline(BSM_price, linestyle="--", color = "black",label="Black–Scholes", alpha=0.7) 
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("prices")
-    plt.grid()
-    plt.legend()
+    new_figure("Averaging Smoothing", "Put Price")
+    plt.plot(steps, crr_p, label="CRR price")
+    plt.plot(steps, crr_AS_p, label="CRR + AS")
+    plt.plot(steps, crr_PEG_AS_p, label="PEG + AS")
+    finish_figure(BSM_price)
 
+    new_figure("Pegging the strike", "Put Price")
+    plt.plot(steps, crr_PEG_p, label="CRR + PEG")
+    plt.plot(steps, crr_p, label="CRR price")
+    finish_figure(BSM_price)
 
-    # Averaging smoothing
-    plt.figure(figsize=(12,5))
-    plt.plot(steps, crr_p , label="CRR price") 
-    plt.plot(steps, crr_AS_p,  label="CRR + AS")
-    plt.plot(even_steps, crr_PEG_AS_p,  label="PEG + AS")
-    plt.title("Averaging Smoothing")
-    plt.axhline(BSM_price, linestyle="--", color = "black",label="Black–Scholes", alpha=0.7) 
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("prices")
-    plt.grid()
-    plt.legend()
+    # Richardson extrapolation
+    new_figure("Richardson Extrapolation", "Put Price")
+    plt.plot(odd_steps, LR_p, label="LR")
+    plt.plot(odd_steps, LR_RE_p, label="LR + RE")
+    finish_figure(BSM_price)
 
-
-
-    #Pegging the strike
-    plt.figure(figsize=(12,5))
-    plt.plot(even_steps, crr_PEG_p,  label="CRR + PEG")
-    plt.plot(steps, crr_p , label="CRR price") 
-    plt.title("Pegging the strike")
-    plt.axhline(BSM_price, linestyle="--", color = "black",label="Black–Scholes", alpha=0.7) 
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("prices")
-    plt.grid()
-    plt.legend()
-
-
-
-    # Richardson-Extrapolation
-    plt.figure(figsize=(12,5))
-    plt.plot(odd_steps, LR_p,  label="LR + RE")
-    plt.plot(odd_steps, LR_RE_p,  label="LR + RE")
-    plt.axhline(BSM_price, linestyle="--", color = "black",label="Black–Scholes", alpha=0.7) 
-    plt.title("Richardson Extrapolation")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("prices")
-    plt.grid()
-    plt.legend()
-
-    #Combination of techniques
+    # Combination of techniques
     # -------------------------------------------- #
-    plt.figure(figsize=(12, 5))
+    new_figure("Combination of Techniques Convergence to Black–Scholes", "Put Price")
     plt.plot(odd_steps, LR_p, label="LR")
     plt.plot(odd_steps, LR_RE_p, label="LR + RE")
     plt.plot(steps, crr_p, label="CRR")
-    plt.plot(steps, crr_BSS_p , label="CRR + BSS") 
-    plt.plot(steps, crr_AS_RE_p , label="CRR + AS + RE") 
-    plt.plot(even_steps, crr_PEG_p, label="PEG")
-    plt.plot(even_steps, crr_PEG_BSS_p, label="PEG + BSS")
-    plt.plot(even_steps, crr_PEG_BSS_RE_p, label="PEG + BSS + RE")
-    plt.plot(even_steps, PEG_AS_RE_p, label="PEG + AS+ RE")
-    plt.axhline(BSM_price, linestyle="--", color = "black",label="Black–Scholes", alpha=0.7) 
-    plt.title("Combination of Techniques Convergence to Black–Scholes")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("Put Price")
-    plt.grid()
-    plt.legend()
+    plt.plot(steps, crr_BSS_p, label="CRR + BSS")
+    plt.plot(steps, crr_AS_RE_p, label="CRR + AS + RE")
+    plt.plot(steps, crr_PEG_p, label="PEG")
+    plt.plot(steps, crr_PEG_BSS_p, label="PEG + BSS")
+    plt.plot(steps, crr_PEG_BSS_RE_p, label="PEG + BSS + RE")
+    plt.plot(steps, PEG_AS_RE_p, label="PEG + AS + RE")
+    finish_figure(BSM_price)
 
-    # last one
-    plt.figure(figsize=(12, 5))
-    plt.plot(odd_steps, LR_p, label="LR odd")
+    new_figure("BEST METHODS Convergence to Black–Scholes", "Put Price")
+    plt.plot(odd_steps, LR_p, label="LR")
     plt.plot(odd_steps, LR_RE_p, label="LR + RE")
-    plt.plot(steps, crr_AS_RE_p , label="CRR + AS + RE") 
-    plt.plot(even_steps, crr_PEG_BSS_RE_p, label="PEG + BSS + RE")
-    plt.plot(even_steps, PEG_AS_RE_p, label="PEG + AS + RE")
-    plt.axhline(BSM_price, linestyle="--", color = "black",label="Black–Scholes", alpha=0.7) 
-    plt.title("BEST METHODS Convergence to Black–Scholes")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("Put Price")
-    plt.grid()
-    plt.legend()
+    plt.plot(steps, crr_AS_RE_p, label="CRR + AS + RE")
+    plt.plot(steps, crr_PEG_BSS_RE_p, label="PEG + BSS + RE")
+    plt.plot(steps, PEG_AS_RE_p, label="PEG + AS + RE")
+    finish_figure(BSM_price)
 
-    plt.tight_layout() 
     plt.show()
-   
-    # table of total errors
 
-compare_models()
+
+if __name__ == "__main__":
+    compare_models()
