@@ -1,772 +1,373 @@
+"""
+American put option: convergence of binomial tree models.
+
+Models:        CRR (Cox-Ross-Rubinstein), Tian, LR (Leisen-Reimer)
+Smoothing:     BSS (Black-Scholes smoothing), AS (averaging), PEG (pegging the strike)
+Extrapolation: RE (Richardson extrapolation)
+
+The American put has no closed formula, so the benchmark is a very accurate
+tree price: LR + RE with N = 5001, checked against CRR + BSS + RE with N = 5000.
+"""
+
 import numpy as np
-import math as m
 import matplotlib.pyplot as plt
 from scipy.stats import norm
 
 
-# Black-Scholes Formula for a European Call Option
-#--------------------------------------------------------
+# --------------------------------------------------------------------------- #
+# Parameters: set CASE to "base" or "seminar"
+# --------------------------------------------------------------------------- #
+CASE = "base"
+
+PARAMS = {
+    "base":    dict(S0=100.0, K=100.0, r=0.05, sigma=0.20, T=1.0),
+    "seminar": dict(S0=100.0, K=110.0, r=0.02, sigma=0.40, T=0.5),
+}
+
+
+# --------------------------------------------------------------------------- #
+# Payoff and Black-Scholes formula for a European put (used by BSS)
+# --------------------------------------------------------------------------- #
+def payoff(S, K):
+    return np.maximum(K - S, 0.0)
+
+
 def black_scholes_put(S0, K, r, sigma, T):
     d1 = (np.log(S0 / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
-    put = -S0 * norm.cdf(-d1) + K * np.exp(-r * T) * norm.cdf(-d2)
-    return put
+    return K * np.exp(-r * T) * norm.cdf(-d2) - S0 * norm.cdf(-d1)
 
 
-#BINOMIAL MODELS
-#----------------------------------------------------------
+# --------------------------------------------------------------------------- #
+# Shared tree helpers
+# --------------------------------------------------------------------------- #
+def stock_layer(S0, u, d, n):
+    """Stock prices after n steps, from the lowest (j = 0) to the highest (j = n)."""
+    j = np.arange(n + 1)
+    return S0 * u**j * d**(n - j)
 
 
-# CRR Binomial Model for an American Option
-#-----------------------------------------------
-def crr(S0, K, r, sigma, T, N):
+def backward_induction(C, S0, K, u, d, p, discount, n):
+    """Roll the option values C (layer n) back to t = 0, with early exercise.
 
-    dt = T / N
-    u = np.exp(sigma * np.sqrt(dt))
-    d = 1 / u
-    p = (np.exp(r * dt) - d) / (u - d)
-
-    # Building the stock tree
-    ST_list=[S0]
-    for j in range(1,N+1,1):
-        box =[]
-        for i in range(j+1):
-         box.append(S0 * (u**i) * (d**(j-i)))
-    
-        ST_list.append(box)
-    
-
-    # option value at maturity 
-    ST = np.array(ST_list[-1])
-    C = np.maximum(-ST+K, 0.0)
-
-    # backward induction
-    discount = np.exp(-r * dt)
-    for i in range(N, 1, -1):
-        # Il nuovo array C avrà 'i' elementi (riduzione di 1 elemento)
-        C_nuovo = np.zeros(i)
-        
-        # Ciclo interno per calcolare ogni nodo nel tempo precedente
-        # 'j' va da 0 a i-1 (indice del nodo al tempo precedente)
-        for j in range(i):
-            # C[j+1] è il valore in caso di UP-move dal nodo j
-            # C[j] è il valore in caso di DOWN-move dal nodo j
-            valore_atteso = p * C[j+1] + (1-p) * C[j]
-            C_nuovo[j] = np.maximum(discount * valore_atteso,max(-ST_list[i-1][j]+K,0))
-    
-        
-        # Sostituisci il vecchio array C con il nuovo array calcolato
-        C = C_nuovo
-    
-    valore_atteso = p * C[1] + (1-p) * C[0]
-    C = discount * valore_atteso
-
-    
-    # Dopo N iterazioni, C conterrà un solo elemento: il prezzo all'inizio (t=0)
-    return C
-
-
-
-
-#Tian Model for American Option
-#---------------------------------------------
-def tian(S0, K, r, sigma, T, N):
-    dt = T / N
-    M=np.exp(r*dt)
-    V=np.exp(sigma**2*dt)
-    u=0.5*(M*V)*(V+1+np.sqrt(V**2+2*V-3))
-    d=0.5*(M*V)*(V+1-np.sqrt(V**2+2*V-3))
-    p = (np.exp(r * dt) - d) / (u - d)
-
-  # Building the stock tree
-    ST_list=[S0]
-    for j in range(1,N+1,1):
-        box =[]
-        for i in range(j+1):
-         box.append(S0 * (u**i) * (d**(j-i)))
-    
-        ST_list.append(box)
-    
-
-    # option value at maturity (CALL)
-    ST = np.array(ST_list[-1])
-    C = np.maximum(-ST+K, 0.0)
-
-    # backward induction
-    discount = np.exp(-r * dt)
-    for i in range(N, 1, -1):
-        # Il nuovo array C avrà 'i' elementi (riduzione di 1 elemento)
-        C_nuovo = np.zeros(i)
-        
-        # Ciclo interno per calcolare ogni nodo nel tempo precedente
-        # 'j' va da 0 a i-1 (indice del nodo al tempo precedente)
-        for j in range(i):
-            # C[j+1] è il valore in caso di UP-move dal nodo j
-            # C[j] è il valore in caso di DOWN-move dal nodo j
-            valore_atteso = p * C[j+1] + (1-p) * C[j]
-            C_nuovo[j] = np.maximum(discount * valore_atteso,max(-ST_list[i-1][j]+K,0))
-    
-        
-        # Sostituisci il vecchio array C con il nuovo array calcolato
-        C = C_nuovo
-    
-    valore_atteso = p * C[1] + (1-p) * C[0]
-    C = discount * valore_atteso
-
-    
-    # Dopo N iterazioni, C conterrà un solo elemento: il prezzo all'inizio (t=0)
-    return C
-
-
-#Leisen-Reimer model for an American call option
-#----------------------------------------------------
-def LR(S0, K, r, sigma, T, N):
-    dt=T/N
-    a=np.exp(r*dt)
-    d1 = (np.log(S0 / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
-    p=0.5+np.sqrt(0.25-0.25*np.exp(-((d2)/(N+(1/3)))**2*(N+(1/6))))
-    P=0.5+np.sqrt(0.25-0.25*np.exp(-((d2+sigma*(np.sqrt(T)))/(N+(1/3)))**2*(N+(1/6))))
-    u=a*(P/p)
-    d=a*((1-P)/(1-p))
-
-      # Building the stock tree
-    ST_list=[S0]
-    for j in range(1,N+1,1):
-        box =[]
-        for i in range(j+1):
-         box.append(S0 * (u**i) * (d**(j-i)))
-    
-        ST_list.append(box)
-    
-
-    # option value at maturity 
-    ST = np.array(ST_list[-1])
-    C = np.maximum(-ST+K, 0.0)
-
-    # backward induction
-    discount = np.exp(-r * dt)
-    for i in range(N, 1, -1):
-        # Il nuovo array C avrà 'i' elementi (riduzione di 1 elemento)
-        C_nuovo = np.zeros(i)
-        
-        # Ciclo interno per calcolare ogni nodo nel tempo precedente
-        # 'j' va da 0 a i-1 (indice del nodo al tempo precedente)
-        for j in range(i):
-            # C[j+1] è il valore in caso di UP-move dal nodo j
-            # C[j] è il valore in caso di DOWN-move dal nodo j
-            valore_atteso = p * C[j+1] + (1-p) * C[j]
-            C_nuovo[j] = np.maximum(discount * valore_atteso,max(-ST_list[i-1][j]+K,0))
-    
-        
-        # Sostituisci il vecchio array C con il nuovo array calcolato
-        C = C_nuovo
-    
-    valore_atteso = p * C[1] + (1-p) * C[0]
-    C = discount * valore_atteso
-
-    
-    # Dopo N iterazioni, C conterrà un solo elemento: il prezzo all'inizio (t=0)
-    return C
-
-
-# SMOOTHING TECHNIQUES
-# -------------------------
-
-#Pegging the strike
-#-------------------------------------------------
-"""
-def crr_PEG(S0, K, r, sigma, T, N):
-
-    dt = T / N
-    u=np.exp((sigma*np.sqrt(dt))+(dt*np.log(K/S0)))
-    d=1/u
-    p = (np.exp(r * dt) - d) / (u - d)
-
-    ST_list=[S0]
-    for j in range(1,N+1,1):
-        box =[]
-        for i in range(j+1):
-         box.append(S0 * (u**i) * (d**(j-i)))
-    
-        ST_list.append(box)
-    
-
-    # option value at maturity 
-    ST = np.array(ST_list[-1])
-    C = np.maximum(K-ST, 0.0)
-
-    # backward induction
-    discount = np.exp(-r * dt)
-    for i in range(N, 1, -1):
-        # Il nuovo array C avrà 'i' elementi (riduzione di 1 elemento)
-        C_nuovo = np.zeros(i)
-        
-        # Ciclo interno per calcolare ogni nodo nel tempo precedente
-        # 'j' va da 0 a i-1 (indice del nodo al tempo precedente)
-        for j in range(i):
-            # C[j+1] è il valore in caso di UP-move dal nodo j
-            # C[j] è il valore in caso di DOWN-move dal nodo j
-            valore_atteso = p * C[j+1] + (1-p) * C[j]
-            C_nuovo[j] = np.maximum(discount * valore_atteso,max(-ST_list[i-1][j]+K,0))
-    
-        
-        # Sostituisci il vecchio array C con il nuovo array calcolato
-        C = C_nuovo
-    
-    valore_atteso = p * C[1] + (1-p) * C[0]
-    C = discount * valore_atteso
-
-    
-    # Dopo N iterazioni, C conterrà un solo elemento: il prezzo all'inizio (t=0)
-    return C
-"""
-
-def crr_PEG(S0, K, r, sigma, T, N):
-    dt = T / N
-
-    u_crr = np.exp(sigma * np.sqrt(dt))
-    d_crr = np.exp(-sigma * np.sqrt(dt))
-    
-   
-    j_values = np.arange(N + 1)
-    final_S_crr = S0 * (u_crr**(N - j_values)) * (d_crr**j_values)
-    
-    j_star = np.argmin(np.abs(final_S_crr - K))
-    
-   
-    S_j_star = final_S_crr[j_star]
-    gamma = (K / S_j_star)**(1 / N)
-
-    
-    u_peg = u_crr * gamma
-    d_peg = d_crr * gamma
-    
-    # 5. Pegged Risk-Neutral Probability
-    q_peg = (np.exp(r * dt) - d_peg) / (u_peg - d_peg)
-    q_d = 1.0 - q_peg
-
-   
-    j_values = np.arange(N + 1)
-    Sn = S0 * (u_peg**(N - j_values)) * (d_peg**j_values)
-    
-    V = np.maximum(-Sn + K, 0)
-    
-   
-    for n in range(N - 1, -1, -1):
-    
-        V_expected = np.exp(-r * dt) * (q_peg * V[:n+1] + q_d * V[1:n+2])
-        j_values_n = np.arange(n + 1)
-        S_n = S0 * (u_peg**(n - j_values_n)) * (d_peg**j_values_n)
-        
-        V_intrinsic = np.maximum(-S_n + K, 0)
-        V = np.maximum(V_intrinsic, V_expected)
-
-    return V[0]
-
-
-#Average smoothing
-#------------------------------------------------
-def crr_AS (S0, K, r, sigma, T, N):   # as = average smoothing
-
-    p1 = crr(S0, K, r, sigma, T, N)
-    p2 = crr(S0, K, r, sigma, T, N+1)
-
-    return (p1+p2)/2
-
-
-#Richardson Extrapolation
-#--------------------------------------
-def crr_RE (S0, K, r, sigma, T, N):
-
-    p1 = crr(S0, K, r, sigma, T, N)
-    p2 = crr(S0, K, r, sigma, T, 2*N)
-
-    return (2*p2-p1)
-
-
-
-#BlackScholes Smoothing
-#-------------------------------------------------
-"""
-def crr_BSS(S0, K, r, sigma, T, N):# BSS = Black-Scholes smoothing
-    dt = T / N
-    u = np.exp(sigma * np.sqrt(dt))
-    d = 1 / u
-    p = (np.exp(r * dt) - d) / (u - d)
-
-    # Building the stock tree
-    ST_list=[[S0]]
-    for j in range(1,N+1,1):
-        box =[]
-        for i in range(j+1):
-         box.append(S0 * (u**i) * (d**(j-i)))
-    
-        ST_list.append(box)
-    
-
-    # option value at maturity 
-    ST = np.array(ST_list[-2])
-    penult_vals=[]
-    for i in range(len(ST)):
-       Cont_vals = PEG_AS_RE(ST[i], K, r, sigma,T,50) 
-       exerc_vals=max(-ST[i]+K, 0)
-       penult_vals.append(max(Cont_vals, exerc_vals))
-    
-    C = penult_vals
-
-
-    # backward induction
-    discount = np.exp(-r * dt)
-    for i in range(N-1, 0, -1):
-        # Il nuovo array C avrà 'i' elementi (riduzione di 1 elemento)
-        C_nuovo = np.zeros(i)
-        
-        # Ciclo interno per calcolare ogni nodo nel tempo precedente
-        # 'j' va da 0 a i-1 (indice del nodo al tempo precedente)
-        for j in range(i):
-            # C[j+1] è il valore in caso di UP-move dal nodo j
-            # C[j] è il valore in caso di DOWN-move dal nodo j
-            valore_atteso = p * C[j+1] + (1-p) * C[j]
-            C_nuovo[j] = np.maximum(discount * valore_atteso,-ST_list[i-1][j]+K)
-    
-        
-        # Sostituisci il vecchio array C con il nuovo array calcolato
-        C = C_nuovo
-    
-    # Dopo N iterazioni, C conterrà un solo elemento: il prezzo all'inizio (t=0)
+    At each step, as for the European option, the continuation value of node j is
+        discount * (p * C[j+1] + (1 - p) * C[j])
+    (C[1:] are the up-moves, C[:-1] the down-moves). Then the holder can
+    exercise, so the value of the node is max(continuation, exercise value).
+    """
+    while n > 0:
+        n = n - 1
+        C = discount * (p * C[1:] + (1 - p) * C[:-1])
+        C = np.maximum(C, payoff(stock_layer(S0, u, d, n), K))
     return C[0]
 
-"""
 
-#Richardson Extrapolation+BlackScholesSmoothing
-#-------------------------------------------------
-"""
-def crr_BSS_RE (S0, K, r, sigma, T, N):
-
-    p1 = crr_BSS(S0, K, r, sigma, T, N)
-    p2 = crr_BSS(S0, K, r, sigma, T, 2*N)
-
-    return (2*p2-p1)
-
-"""
-
-#Richardson Extrapolation + Average smoothing
-#-------------------------------------------------
-def crr_AS_RE (S0, K, r, sigma, T, N):
-
-    p1 = crr_AS(S0, K, r, sigma, T, N)
-    p2 = crr_AS(S0, K, r, sigma, T, 2*N)
-
-    return (2*p2-p1)
+def price_on_tree(S0, K, r, T, N, u, d, p):
+    """American put on a binomial tree with given u, d, p."""
+    C = payoff(stock_layer(S0, u, d, N), K)              # payoff at maturity
+    return backward_induction(C, S0, K, u, d, p, np.exp(-r * T / N), N)
 
 
-#Richardson Extrapolation + Pegging the strike
-#--------------------------------------------------
-def crr_PEG_RE (S0, K, r, sigma, T, N):   
+def price_on_tree_BSS(S0, K, r, sigma, T, N, u, d, p):
+    """Black-Scholes smoothing: on the penultimate layer one step of length dt
+    is left, so the value is max(European Black-Scholes price with time dt,
+    exercise value). This removes the payoff kink from the tree."""
+    dt = T / N
+    S = stock_layer(S0, u, d, N - 1)
+    C = np.maximum(black_scholes_put(S, K, r, sigma, dt), payoff(S, K))
+    return backward_induction(C, S0, K, u, d, p, np.exp(-r * dt), N - 1)
 
-    p1 = crr_PEG(S0, K, r, sigma, T, N)
-    p2 = crr_PEG(S0, K, r, sigma, T, N+1)
-    
-    return (p1+p2)/2
+
+# --------------------------------------------------------------------------- #
+# Lattice parameters
+# --------------------------------------------------------------------------- #
+def crr_params(r, sigma, T, N):
+    dt = T / N
+    u = np.exp(sigma * np.sqrt(dt))
+    d = 1 / u
+    p = (np.exp(r * dt) - d) / (u - d)
+    return u, d, p
 
 
-#BlackScholes Smoothing + Pegging the strike 
-#--------------------------------------------------
-"""
+def peg_params(S0, K, r, sigma, T, N):
+    """CRR tree rescaled by gamma so that the final node closest to K lands on K."""
+    dt = T / N
+    u_crr, d_crr, _ = crr_params(r, sigma, T, N)
+    ST = stock_layer(S0, u_crr, d_crr, N)
+    S_closest = ST[np.argmin(np.abs(ST - K))]
+    gamma = (K / S_closest) ** (1 / N)
+    u, d = u_crr * gamma, d_crr * gamma
+    p = (np.exp(r * dt) - d) / (u - d)
+    return u, d, p
+
+
+def peizer_pratt(z, N):
+    """Peizer-Pratt inversion (method 2), used by Leisen-Reimer."""
+    return 0.5 + np.sign(z) * np.sqrt(
+        0.25 - 0.25 * np.exp(-(z / (N + 1 / 3))**2 * (N + 1 / 6)))
+
+
+# --------------------------------------------------------------------------- #
+# Binomial models
+# --------------------------------------------------------------------------- #
+def crr(S0, K, r, sigma, T, N):
+    u, d, p = crr_params(r, sigma, T, N)
+    return price_on_tree(S0, K, r, T, N, u, d, p)
+
+
+def tian(S0, K, r, sigma, T, N):
+    dt = T / N
+    M = np.exp(r * dt)
+    V = np.exp(sigma**2 * dt)
+    root = np.sqrt(V**2 + 2 * V - 3)
+    u = 0.5 * M * V * (V + 1 + root)
+    d = 0.5 * M * V * (V + 1 - root)
+    p = (M - d) / (u - d)
+    return price_on_tree(S0, K, r, T, N, u, d, p)
+
+
+def LR(S0, K, r, sigma, T, N):
+    if N % 2 == 0:
+        raise ValueError("Leisen-Reimer needs an odd number of steps")
+    dt = T / N
+    a = np.exp(r * dt)
+    d1 = (np.log(S0 / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    p = peizer_pratt(d2, N)
+    P = peizer_pratt(d1, N)
+    u = a * P / p
+    d = a * (1 - P) / (1 - p)
+    return price_on_tree(S0, K, r, T, N, u, d, p)
+
+
+# --------------------------------------------------------------------------- #
+# Smoothing techniques and Richardson extrapolation
+# --------------------------------------------------------------------------- #
+def crr_BSS(S0, K, r, sigma, T, N):          # Black-Scholes smoothing
+    u, d, p = crr_params(r, sigma, T, N)
+    return price_on_tree_BSS(S0, K, r, sigma, T, N, u, d, p)
+
+
+def crr_AS(S0, K, r, sigma, T, N):           # Averaging smoothing
+    return 0.5 * (crr(S0, K, r, sigma, T, N) + crr(S0, K, r, sigma, T, N + 1))
+
+
+def crr_RE(S0, K, r, sigma, T, N):           # Richardson extrapolation, error O(1/N)
+    return 2 * crr(S0, K, r, sigma, T, 2 * N) - crr(S0, K, r, sigma, T, N)
+
+
+def LR_RE(S0, K, r, sigma, T, N):            # Richardson for LR
+    # For the American put the early-exercise boundary makes the LR error O(1/N)
+    # (not O(1/N^2) as for European options), so we use 2 P(2N+1) - P(N).
+    # 2N+1 keeps the number of steps odd.
+    return 2 * LR(S0, K, r, sigma, T, 2 * N + 1) - LR(S0, K, r, sigma, T, N)
+
+
+def crr_PEG(S0, K, r, sigma, T, N):          # Pegging the strike
+    u, d, p = peg_params(S0, K, r, sigma, T, N)
+    return price_on_tree(S0, K, r, T, N, u, d, p)
+
+
+def crr_BSS_RE(S0, K, r, sigma, T, N):
+    return 2 * crr_BSS(S0, K, r, sigma, T, 2 * N) - crr_BSS(S0, K, r, sigma, T, N)
+
+
+def crr_AS_RE(S0, K, r, sigma, T, N):
+    return 2 * crr_AS(S0, K, r, sigma, T, 2 * N) - crr_AS(S0, K, r, sigma, T, N)
+
+
+def crr_PEG_RE(S0, K, r, sigma, T, N):
+    return 2 * crr_PEG(S0, K, r, sigma, T, 2 * N) - crr_PEG(S0, K, r, sigma, T, N)
+
+
 def crr_PEG_BSS(S0, K, r, sigma, T, N):
-   dt = T / N
-   u=np.exp((sigma*np.sqrt(dt))+(dt*np.log(K/S0)))
-   d=1/u
-   p = (np.exp(r * dt) - d) / (u - d)
+    u, d, p = peg_params(S0, K, r, sigma, T, N)
+    return price_on_tree_BSS(S0, K, r, sigma, T, N, u, d, p)
 
 
-   # Building the stock tree
-   ST_list=[[S0]]
-   for j in range(1,N+1,1):
-        box =[]
-        for i in range(j+1):
-         box.append(S0 * (u**i) * (d**(j-i)))
-    
-        ST_list.append(box)
-    
-
-    # option value at maturity 
-   ST = np.array(ST_list[-2])
-   penult_vals=[]
-   for i in range(len(ST)):
-       Cont_vals =PEG_AS_RE(ST[i], K, r, sigma,T,50)
-       exerc_vals=max(ST[i]-K, 0)
-       penult_vals.append(max(Cont_vals, exerc_vals))
-    
-   C = penult_vals
-
-
-    # backward induction
-   discount = np.exp(-r * dt)
-   for i in range(N-1, 0, -1):
-        # Il nuovo array C avrà 'i' elementi (riduzione di 1 elemento)
-        C_nuovo = np.zeros(i)
-        
-        # Ciclo interno per calcolare ogni nodo nel tempo precedente
-        # 'j' va da 0 a i-1 (indice del nodo al tempo precedente)
-        for j in range(i):
-            # C[j+1] è il valore in caso di UP-move dal nodo j
-            # C[j] è il valore in caso di DOWN-move dal nodo j
-            valore_atteso = p * C[j+1] + (1-p) * C[j]
-            C_nuovo[j] = np.maximum(discount * valore_atteso,ST_list[i-1][j]-K)
-    
-        
-        # Sostituisci il vecchio array C con il nuovo array calcolato
-        C = C_nuovo
-    
-    # Dopo N iterazioni, C conterrà un solo elemento: il prezzo all'inizio (t=0)
-   return C[0]
-   
-"""
-
-#BlackScholes Smoothing + Pegging the strike + Richardson Extrapolation
-#-------------------------------------------------------------------------
-"""
 def crr_PEG_BSS_RE(S0, K, r, sigma, T, N):
-   p1 = crr_PEG_BSS(S0, K, r, sigma, T, N)
-   p2 = crr_PEG_BSS(S0, K, r, sigma, T, 2*N)
-
-   return (2*p2-p1)
-
-"""
-
-#Leisen-Reimer + Richardson Extrapolation
-#----------------------------------------------
-def LR_RE (S0, K, r, sigma, T, N):
-
-    p1 = LR(S0, K, r, sigma, T, N)
-    p2 = LR(S0, K, r, sigma, T, 2*N+1)
-
-    return (2*p2-p1)
-
-# PEG+AS
-def crr_PEG_AS (S0, K, r, sigma, T, N):   # as = average smoothing
-
-    p1 = crr_PEG(S0, K, r, sigma, T, N)
-    p2 = crr_PEG(S0, K, r, sigma, T, N+1)
-
-    return (p1+p2)/2
-
-#PEG+AS+RE
-
-def PEG_AS_RE (S0, K, r, sigma, T, N):
-    p1 = crr_PEG_AS(S0, K, r, sigma, T, N)
-    p2 = crr_PEG_AS(S0, K, r, sigma, T, 2*N)
-
-    return (2*p2-p1)
+    return 2 * crr_PEG_BSS(S0, K, r, sigma, T, 2 * N) - crr_PEG_BSS(S0, K, r, sigma, T, N)
 
 
-
-# BENCHMARK COMPUTATION
-# -------------------------
-# First parameters used
-"""
-N = 10000
-BNK = crr(100,100,0.05,0.2,1,N)
-print("BENCHMARK CRR COMPUTED (First parameters):",BNK)
-
-BNK = LR_RE(100,100,0.05,0.2,1,7000)
-print("BENCHMARK LR_RE COMPUTED (First parameters):",BNK)
-
-BSP = black_scholes_put(100,100,0.05,0.2,1)
-print("BENCHMARK BLACK-SCHOLES (First parameters):", BSP)
-"""
-#BNK = 6.090295412872714
-# Parameters of the seminar
-"""
-N = 10000
-BNK = crr(100,110,0.02,0.4,0.5,N)
-print("BENCHMARK CRR COMPUTED:",BNK)
-"""
-BNK = LR_RE(100,110,0.02,0.4,0.5,7000)
-print("BENCHMARK LR_RE COMPUTED:",BNK)
-
-BSP = black_scholes_put(100,110,0.02,0.4,0.5)
-print("BENCHMARK BLACK-SCHOLES:", BSP)
+def crr_PEG_AS(S0, K, r, sigma, T, N):
+    return 0.5 * (crr_PEG(S0, K, r, sigma, T, N) + crr_PEG(S0, K, r, sigma, T, N + 1))
 
 
+def PEG_AS_RE(S0, K, r, sigma, T, N):
+    return 2 * crr_PEG_AS(S0, K, r, sigma, T, 2 * N) - crr_PEG_AS(S0, K, r, sigma, T, N)
 
+
+# --------------------------------------------------------------------------- #
+# Benchmark
+# --------------------------------------------------------------------------- #
+def benchmark(S0, K, r, sigma, T):
+    """Very accurate price used as the 'true' value (takes a few seconds)."""
+    return LR_RE(S0, K, r, sigma, T, 5001)
+
+
+# --------------------------------------------------------------------------- #
+# Plot helpers
+# --------------------------------------------------------------------------- #
+def new_figure(title, ylabel):
+    plt.figure(figsize=(12, 5))
+    plt.title(title)
+    plt.xlabel("Number of Steps (N)")
+    plt.ylabel(ylabel)
+    plt.grid()
+
+
+def finish_figure(BNK=None):
+    if BNK is not None:
+        plt.axhline(BNK, linestyle="--", color="black", label="Benchmark", alpha=0.7)
+    plt.legend()
+    plt.tight_layout()
+
+
+# --------------------------------------------------------------------------- #
 # Main comparison script
-# -------------------------
+# --------------------------------------------------------------------------- #
 def compare_models():
-    """
-    # Firts parameters used
-    S0 = 100
-    K = 100
-    r = 0.05
-    sigma = 0.2
-    T = 1.0
-    """
-    # Parameters of the seminar
-    S0 = 100
-    K = 110
-    r = 0.02
-    sigma = 0.4
-    T = 0.5
-   
+    prm = PARAMS[CASE]
 
-    # Different binomial steps
-    steps = np.arange(25, 250, 3)
-    l = len(steps)
-    even_steps = steps[steps % 2 == 0]
-    l_e = len(even_steps)
-    odd_steps = steps[steps % 2 == 1]
-    l_o =len(odd_steps)
+    steps = np.arange(200, 400, 3)
+    odd_steps = steps[steps % 2 == 1]       # LR only works with odd N
 
+    BNK = benchmark(**prm)
+    check = crr_BSS_RE(N=5000, **prm)
+    print(f"Case: {CASE}  {prm}")
+    print(f"Benchmark (LR + RE, N = 5001):       {BNK:.8f}")
+    print(f"Check     (CRR + BSS + RE, N = 5000): {check:.8f}")
+    print(f"European put (Black-Scholes):        {black_scholes_put(**prm):.8f}")
 
-    crr_p = np.zeros(l)
-    tian_p = np.zeros(l)
-    LR_p = np.zeros(l_o)
-    crr_BSS_p = np.zeros(l)
-    crr_AS_p = np.zeros(l)
-    crr_PEG_p = np.zeros(l_e)
-    crr_RE_p = np.zeros(l)
-    crr_BSS_RE_p = np.zeros(l)
-    crr_PEG_RE_p = np.zeros(l_e)
-    crr_AS_RE_p = np.zeros(l)
-    crr_PEG_BSS_p = np.zeros(l_e)
-    crr_PEG_BSS_RE_p = np.zeros(l_e)
-    LR_RE_p = np.zeros(l_o)
+    # Prices for every N
+    def prices(method, Ns):
+        return np.array([method(N=N, **prm) for N in Ns])
 
-    PEG_AS_RE_p = np.zeros(l_e)
-   
-    
+    crr_p            = prices(crr, steps)
+    tian_p           = prices(tian, steps)
+    LR_p             = prices(LR, odd_steps)
+    crr_BSS_p        = prices(crr_BSS, steps)
+    crr_AS_p         = prices(crr_AS, steps)
+    crr_BSS_RE_p     = prices(crr_BSS_RE, steps)
+    crr_AS_RE_p      = prices(crr_AS_RE, steps)
+    crr_PEG_p        = prices(crr_PEG, steps)
+    crr_PEG_RE_p     = prices(crr_PEG_RE, steps)
+    crr_PEG_BSS_RE_p = prices(crr_PEG_BSS_RE, steps)
+    PEG_AS_RE_p      = prices(PEG_AS_RE, steps)
+    LR_RE_p          = prices(LR_RE, odd_steps)
 
-    index = 0
-    index_e =0
-    index_o =0
-    # Compute prices values
-    for N in steps:
-        crr_p[index]= crr(S0, K, r, sigma, T, N)
-        tian_p[index]=tian(S0, K, r, sigma, T, N)
-        #crr_BSS_p[index] = crr_BSS(S0, K, r, sigma, T, N)
-        crr_AS_p[index] = crr_AS(S0, K, r, sigma, T, N)
-        crr_RE_p[index] = crr_RE(S0, K, r, sigma, T, N)
-        crr_AS_RE_p[index] = crr_AS_RE(S0, K, r, sigma, T, N)
-        #crr_BSS_RE_p[index] = crr_BSS_RE(S0, K, r, sigma, T, N)
-        
-        if N%2==0:
-             crr_PEG_p[index_e] = crr_PEG(S0, K, r, sigma, T, N)
-             crr_PEG_RE_p[index_e] = crr_PEG_RE(S0, K, r, sigma, T, N)
-             #crr_PEG_BSS_p[index_e] = crr_PEG_BSS_RE(S0, K, r, sigma, T, N)
-             #crr_PEG_BSS_RE_p[index_e] = crr_PEG_BSS_RE(S0, K, r, sigma, T, N)
-             PEG_AS_RE_p[index_e] = PEG_AS_RE(S0, K, r, sigma, T, N)
-             index_e+=1
-        else:
-            LR_p[index_o] = LR(S0, K, r, sigma, T, N)
-            LR_RE_p[index_o] = LR_RE(S0, K, r, sigma, T, N)
-            index_o+=1
+    # Absolute errors
+    crr_e            = np.abs(crr_p - BNK)
+    tian_e           = np.abs(tian_p - BNK)
+    LR_e             = np.abs(LR_p - BNK)
+    crr_BSS_e        = np.abs(crr_BSS_p - BNK)
+    crr_AS_e         = np.abs(crr_AS_p - BNK)
+    crr_BSS_RE_e     = np.abs(crr_BSS_RE_p - BNK)
+    crr_AS_RE_e      = np.abs(crr_AS_RE_p - BNK)
+    crr_PEG_e        = np.abs(crr_PEG_p - BNK)
+    crr_PEG_RE_e     = np.abs(crr_PEG_RE_p - BNK)
+    crr_PEG_BSS_RE_e = np.abs(crr_PEG_BSS_RE_p - BNK)
+    PEG_AS_RE_e      = np.abs(PEG_AS_RE_p - BNK)
+    LR_RE_e          = np.abs(LR_RE_p - BNK)
 
-        index +=1
-
-    #errors
-    crr_e = abs(crr_p - BNK)
-    tian_e = abs(tian_p - BNK)
-    LR_e = abs(LR_p - BNK)
-
-    crr_BSS_e = abs(crr_BSS_p - BNK)
-    crr_AS_e = abs(crr_AS_p - BNK)
-    crr_PEG_e = abs(crr_PEG_p - BNK)
-    crr_RE_e = abs(crr_RE_p - BNK)
-    crr_BSS_RE_e = abs(crr_BSS_RE_p - BNK)
-    crr_AS_RE_e = abs(crr_AS_RE_p - BNK)
-    crr_PEG_RE_e = abs(crr_PEG_RE_p - BNK)
-    crr_PEG_BSS_e = abs(crr_PEG_BSS_p - BNK)
-    crr_PEG_BSS_RE_e = abs(crr_PEG_BSS_RE_p - BNK)
-
-    PEG_AS_RE_e = abs(PEG_AS_RE_p - BNK)
-
-    LR_RE_e = abs(LR_RE_p - BNK)
-
-
-    
-    
-    # Price convergence
+    # Price convergence of the three models
     # ----------------------------------------- #
-    #CRR
-    plt.figure(figsize=(12, 5))
-    plt.plot(steps, crr_p , label="CRR price") 
-    plt.axhline(BNK, linestyle="--", color = "black", label="Benchmark", alpha=0.7) 
-    plt.title("CRR Convergence to Benchmark")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("American Put Price")
-    plt.grid()
-    plt.legend()
+    new_figure("CRR Convergence to Benchmark", "American Put Price")
+    plt.plot(steps, crr_p, label="CRR price")
+    finish_figure(BNK)
 
+    new_figure("Tian Convergence to Benchmark", "American Put Price")
+    plt.plot(steps, tian_p, label="Tian price")
+    finish_figure(BNK)
 
-    #TIAN
-    plt.figure(figsize=(12, 5))
-    plt.plot(steps, tian_p , label="Tian price") 
-    plt.axhline(BNK, linestyle="--", color = "black", label="Benchmark", alpha=0.7) 
-    plt.title("Tian Convergence to Benchmark")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("American Put Price")
-    plt.grid()
-    plt.legend()
-    
-    #LR 
-    plt.figure(figsize=(12, 5))
+    new_figure("LR Convergence to Benchmark", "American Put Price")
     plt.plot(odd_steps, LR_p, label="LR price")
-    plt.axhline(BNK, linestyle="--", color = "black", label="Benchmark", alpha=0.7) 
-    plt.title("LR Convergence to Benchmark")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("American Put Price")
-    plt.grid()
-    plt.legend()
+    finish_figure(BNK)
 
-    #ALL MODELS
-    plt.figure(figsize=(12, 5))
+    new_figure("CRR, Tian, LR Convergence to Benchmark", "American Put Price")
     plt.plot(steps, tian_p, label="Tian price")
     plt.plot(odd_steps, LR_p, label="LR price")
-    plt.plot(steps, crr_p , label="CRR price") 
-    plt.axhline(BNK, linestyle="--", color = "black", label="Benchmark", alpha=0.7) 
-    plt.title("CRR, Tian, LR Convergence to Benchmark")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("American Put Price")
-    plt.grid()
-    plt.legend()
- 
- 
-    # Error plot
-    # -------------------------------------------- #
-    plt.figure(figsize=(12,5))
-    plt.plot(steps, crr_e,  label="CRR")
-    plt.plot(steps, 1/steps,  label="1/N")
-    plt.title("CRR Absolute error")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("Error")
-    plt.grid()
-    plt.legend()
+    plt.plot(steps, crr_p, label="CRR price")
+    finish_figure(BNK)
 
-
-    plt.figure(figsize=(12,5))
-    plt.plot(odd_steps,LR_e, label="LR")
-    plt.plot(steps, 1/steps,  label="1/N")
-    plt.title("LR Absolute error")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("Error")
-    plt.grid()
-    plt.legend()
-
-
-    plt.figure(figsize=(12,5))
-    plt.plot(steps,tian_e, label="Tian")
-    plt.title("Tian Absolute error")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("Error")
-    plt.grid()
-    plt.legend()
-
+    new_figure("Absolute error for the three models, American Put", "Error")
+    plt.plot(steps, crr_e, label="CRR")
+    plt.plot(steps, tian_e, label="Tian")
+    plt.plot(odd_steps, LR_e, label="LR")
+    plt.plot(steps, 1 / steps, label="1/N")
+    finish_figure()
 
     # Smoothing
     # -------------------------------------------- #
-    plt.figure(figsize=(12,5))
-    plt.plot(steps, crr_p , label="CRR price") 
-    plt.plot(steps, crr_AS_p,  label="CRR + AS")
-    plt.plot(even_steps, crr_PEG_p,  label="PEG")
-    plt.title("Averaging Smoothing & Pegging the strike convergence")
-    plt.axhline(BNK, linestyle="--", color = "black", label="Benchmark", alpha=0.7) 
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("American Put Prices")
-    plt.grid()
-    plt.legend()
+    new_figure("Smoothing techniques convergence", "American Put Price")
+    plt.plot(steps, crr_p, label="CRR price")
+    plt.plot(steps, crr_BSS_p, label="CRR + BSS")
+    plt.plot(steps, crr_AS_p, label="CRR + AS")
+    plt.plot(steps, crr_PEG_p, label="PEG")
+    finish_figure(BNK)
 
-    #ERRORS
-    plt.figure(figsize=(12,5))
-    plt.plot(steps, crr_AS_e,  label="CRR + AS")
-    plt.plot(even_steps, crr_PEG_e,  label="PEG")
-    plt.title("Averaging Smoothing & Pegging the strike errors")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("Errors")
-    plt.grid()
-    plt.legend()
-    
-    # Richardson-Extrapolation for LE
-    plt.figure(figsize=(12,5))
-    plt.plot(odd_steps, LR_p,  label="LR")
-    plt.plot(odd_steps, LR_RE_p,  label="LR + RE")
-    plt.axhline(BNK, linestyle="--",color = "black", label="Benchmark", alpha=0.7) 
-    plt.title("Richardson Extrapolation on CRR and LR models")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("prices")
-    plt.grid()
-    plt.legend()
+    new_figure("Smoothing techniques errors", "Error")
+    plt.plot(steps, crr_e, label="CRR")
+    plt.plot(steps, crr_BSS_e, label="CRR + BSS")
+    plt.plot(steps, crr_AS_e, label="CRR + AS")
+    plt.plot(steps, crr_PEG_e, label="PEG")
+    finish_figure()
 
-    # error for LR + RE
-    plt.figure(figsize=(12,5))
-    plt.plot(odd_steps, LR_RE_e,  label="LR + RE")
-    plt.title("LR + Richardson Extrapolation absolute error")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("Error")
-    plt.grid()
-    plt.legend()
-
-    #Combination of techniques
+    # Richardson extrapolation
     # -------------------------------------------- #
-    plt.figure(figsize=(12, 5))
+    new_figure("Richardson Extrapolation", "American Put Price")
+    plt.plot(odd_steps, LR_p, label="LR")
+    plt.plot(odd_steps, LR_RE_p, label="LR + RE")
+    plt.plot(steps, crr_PEG_RE_p, label="PEG + RE")
+    finish_figure(BNK)
+
+    new_figure("Richardson Extrapolation errors", "Error")
+    plt.plot(odd_steps, LR_e, label="LR")
+    plt.plot(odd_steps, LR_RE_e, label="LR + RE")
+    plt.plot(steps, crr_PEG_RE_e, label="PEG + RE")
+    finish_figure()
+
+    # Combination of techniques
+    # -------------------------------------------- #
+    new_figure("Convergence of different binomial models", "American Put Price")
     plt.plot(odd_steps, LR_p, label="LR")
     plt.plot(odd_steps, LR_RE_p, label="LR + RE")
     plt.plot(steps, crr_p, label="CRR")
-    plt.plot(steps, crr_AS_RE_p , label="CRR + AS + RE") 
-    plt.plot(even_steps, crr_PEG_p, label="PEG")
-    plt.plot(even_steps, PEG_AS_RE_p, label="PEG+AS+RE")
-    plt.axhline(BNK, linestyle="--", color = "black", label="Benchmark", alpha=0.7) 
-    plt.title("Convergence of different binomial models")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("American Put price")
-    plt.grid()
-    plt.legend()
+    plt.plot(steps, crr_BSS_RE_p, label="CRR + BSS + RE")
+    plt.plot(steps, crr_AS_RE_p, label="CRR + AS + RE")
+    plt.plot(steps, crr_PEG_p, label="PEG")
+    plt.plot(steps, crr_PEG_BSS_RE_p, label="PEG + BSS + RE")
+    plt.plot(steps, PEG_AS_RE_p, label="PEG + AS + RE")
+    finish_figure(BNK)
 
-    #ERROr plot
-    plt.figure(figsize=(12, 5))
-    plt.plot(odd_steps, LR_e, label="LR error")
-    plt.plot(odd_steps, LR_RE_e, label="LR + RE error")
-    plt.plot(steps, crr_e, label="CRR error")
-    plt.plot(steps, crr_AS_RE_e , label="CRR + AS + RE error") 
-    plt.plot(even_steps, crr_PEG_e, label="PEG error")
-    plt.plot(even_steps, PEG_AS_RE_e, label="PEG + AS + RE error")
-    plt.title("Errors of different binomial models")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("error")
-    plt.grid()
-    plt.legend()
+    new_figure("Errors of different binomial models", "Error")
+    plt.plot(odd_steps, LR_e, label="LR")
+    plt.plot(odd_steps, LR_RE_e, label="LR + RE")
+    plt.plot(steps, crr_e, label="CRR")
+    plt.plot(steps, crr_BSS_RE_e, label="CRR + BSS + RE")
+    plt.plot(steps, crr_AS_RE_e, label="CRR + AS + RE")
+    plt.plot(steps, crr_PEG_e, label="PEG")
+    plt.plot(steps, crr_PEG_BSS_RE_e, label="PEG + BSS + RE")
+    plt.plot(steps, PEG_AS_RE_e, label="PEG + AS + RE")
+    finish_figure()
 
-
-
-    # last one
-    plt.figure(figsize=(12, 5))
+    # Best methods
+    new_figure("BEST METHODS Convergence to Benchmark", "American Put Price")
     plt.plot(odd_steps, LR_RE_p, label="LR + RE")
-    plt.plot(steps, crr_AS_RE_p , label="CRR + AS + RE") 
-    plt.plot(even_steps, PEG_AS_RE_p, label="PEG + AS + RE")
-    plt.axhline(BNK, linestyle="--", color = "black", label="Benchmark", alpha=0.7) 
-    plt.title("BEST METHODS Convergence to Benchmark")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("American Put price")
-    plt.grid()
-    plt.legend()
+    plt.plot(steps, crr_BSS_RE_p, label="CRR + BSS + RE")
+    plt.plot(steps, crr_AS_RE_p, label="CRR + AS + RE")
+    plt.plot(steps, PEG_AS_RE_p, label="PEG + AS + RE")
+    finish_figure(BNK)
 
-    #Error last one
-    plt.figure(figsize=(12, 5))
-    plt.plot(odd_steps, LR_RE_e, label="LR + RE error")
-    plt.plot(steps, crr_AS_RE_e , label="CRR + AS + RE error") 
-    plt.plot(even_steps, PEG_AS_RE_e, label="PEG+AS+RE")
-    plt.title("BEST METHODS Errors")
-    plt.xlabel("Number of Steps (N)")
-    plt.ylabel("Error")
-    plt.grid()
-    plt.legend() 
+    new_figure("BEST METHODS Errors", "Error")
+    plt.plot(odd_steps, LR_RE_e, label="LR + RE")
+    plt.plot(steps, crr_BSS_RE_e, label="CRR + BSS + RE")
+    plt.plot(steps, crr_AS_RE_e, label="CRR + AS + RE")
+    plt.plot(steps, PEG_AS_RE_e, label="PEG + AS + RE")
+    finish_figure()
 
-
-    plt.tight_layout() 
     plt.show()
 
 
-    # table of total errors
-
-compare_models()
+if __name__ == "__main__":
+    compare_models()
